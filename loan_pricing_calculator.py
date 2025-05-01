@@ -5,7 +5,7 @@ from scipy import optimize
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, repayment_type='monthly', consider_vat=True):
+def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, consider_vat=True, repayment_type='monthly'):
     """Calculate IRR using the logic from irr_calculator_app.py"""
     base_amount = principal
     monthly_fee = base_amount * monthly_rate * tenure
@@ -24,9 +24,16 @@ def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, repayme
     total_sales = base_amount + total_income
     
     cash_flows = []
-    cash_flows.append(-principal)
+    cash_flows.append(-principal)  # Initial outflow
     
-    if repayment_type == 'monthly':
+    if repayment_type == 'bullet':
+        # Single payment at the end including principal, total fee and admin fee
+        for i in range(tenure - 1):
+            cash_flows.append(0)
+        cash_flows.append(total_sales)
+    
+    elif repayment_type == 'monthly':
+        # Monthly payments
         monthly_principal = base_amount / tenure
         monthly_profit = monthly_fee_after_vat / tenure
         
@@ -35,6 +42,32 @@ def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, repayme
                 cash_flows.append(monthly_principal + monthly_profit + admin_fee_after_vat)
             else:
                 cash_flows.append(monthly_principal + monthly_profit)
+    
+    elif repayment_type == 'bi_monthly':
+        # Bi-monthly payments
+        num_payments = tenure // 2
+        remainder = tenure % 2
+        
+        payment_instances = num_payments + (1 if remainder > 0 else 0)
+        if payment_instances > 0:
+            bi_monthly_principal = base_amount / payment_instances
+            bi_monthly_profit = monthly_fee_after_vat / payment_instances
+        else:
+            bi_monthly_principal = 0
+            bi_monthly_profit = 0
+        
+        payment_made = False
+        for i in range(tenure):
+            is_payment_period = ((i + 1) % 2 == 0) or (i == tenure - 1 and remainder > 0)
+            
+            if is_payment_period and payment_instances > 0:
+                current_payment = bi_monthly_principal + bi_monthly_profit
+                if not payment_made:
+                    current_payment += admin_fee_after_vat
+                    payment_made = True
+                cash_flows.append(current_payment)
+            else:
+                cash_flows.append(0)
     
     try:
         def npv(rate, cash_flows):
@@ -161,6 +194,17 @@ if st.button("⚙️ Advanced Settings", help="Configure scenario and IRR parame
                 format_func=lambda x: f"{x} ({5 if x == 'Tight' else 10 if x == 'Normal' else 22 if x == 'Flush' else 35}% free cash)"
             )
             
+            repayment_type = st.selectbox(
+                "Repayment Structure",
+                options=["monthly", "bi_monthly", "bullet"],
+                format_func=lambda x: {
+                    "monthly": "Monthly Installments",
+                    "bi_monthly": "Bi-Monthly Installments",
+                    "bullet": "Bullet Payment (at end)"
+                }[x],
+                help="Choose how the principal and fees are repaid"
+            )
+            
             is_micro = st.checkbox("Is Micro deal?", value=False)
             consider_vat = st.checkbox("Consider 15% VAT Impact", value=True, 
                 help="When checked, IRR calculations will account for 15% VAT deduction from fees")
@@ -185,6 +229,7 @@ else:
     admin_fee_rate = 0.015  # Default admin fee rate
     consider_vat = True  # Default to considering VAT
     include_admin_fee = True  # Default to including admin fee
+    repayment_type = "monthly"  # Default to monthly installments
 
 # Calculate the price
 risk_multipliers = {"r1": 0.75, "r2": 1.0, "r3": 1.25}
@@ -198,7 +243,10 @@ P_raw = hk + alpha * R - psi * F + gamma * I_micro
 P_min = max(P_raw, floor)
 
 # Calculate IRR for current scenario
-current_irr = calculate_irr(principal, P_min/100, tenure, admin_fee_rate if include_admin_fee else 0.0, consider_vat=consider_vat)
+current_irr = calculate_irr(principal, P_min/100, tenure, 
+                          admin_fee_rate if include_admin_fee else 0.0, 
+                          consider_vat=consider_vat,
+                          repayment_type=repayment_type)
 
 # Generate matrices
 st.markdown("---")
@@ -216,7 +264,10 @@ def generate_matrices():
                     F = cash_percentages[c]
                     I = 1 if m else 0
                     P = max(hk + alpha * R - psi * F + gamma * I, floor)
-                    irr = calculate_irr(principal, P/100, t, admin_fee_rate if include_admin_fee else 0.0, consider_vat=consider_vat)
+                    irr = calculate_irr(principal, P/100, t, 
+                                      admin_fee_rate if include_admin_fee else 0.0, 
+                                      consider_vat=consider_vat,
+                                      repayment_type=repayment_type)
                     records.append({
                         "Tenure": t,
                         "Risk": r,
@@ -258,7 +309,7 @@ st.write("Minimum Price Matrix (%/month)")
 st.dataframe(price_matrix.style.format("{:.3f}"))
 
 # Display IRR matrices for each tenure
-irr_title_col, vat_toggle_col, admin_toggle_col = st.columns([2, 1, 1])
+irr_title_col, vat_toggle_col, admin_toggle_col, repayment_toggle_col = st.columns([2, 1, 1, 1])
 with irr_title_col:
     st.write("IRR Matrices (%/year) by Tenure")
 with vat_toggle_col:
@@ -267,6 +318,17 @@ with vat_toggle_col:
 with admin_toggle_col:
     include_admin_fee = st.toggle("Include Admin Fee", value=include_admin_fee,
         help="Toggle to include/exclude one-time admin fee in IRR calculations")
+with repayment_toggle_col:
+    repayment_type = st.selectbox(
+        "Repayment Type",
+        options=["monthly", "bi_monthly", "bullet"],
+        format_func=lambda x: {
+            "monthly": "Monthly",
+            "bi_monthly": "Bi-Monthly",
+            "bullet": "Bullet"
+        }[x],
+        help="Choose how the principal and fees are repaid"
+    )
 
 # Recalculate matrices with current settings
 price_matrix, irr_matrices = generate_matrices()
@@ -279,6 +341,7 @@ if include_admin_fee:
     status_text.append(f"including {admin_fee_rate*100:.1f}% admin fee")
 elif not include_admin_fee:
     status_text.append("excluding admin fee")
+status_text.append(f"with {repayment_type.replace('_', '-')} repayment")
 st.caption(f"Values shown {', '.join(status_text)}")
 
 tabs = st.tabs([f"{t} Month{'s' if t > 1 else ''}" for t in range(1, 7)])
