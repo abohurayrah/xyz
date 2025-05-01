@@ -3,351 +3,476 @@ import pandas as pd
 import numpy as np
 from scipy import optimize
 import matplotlib.pyplot as plt
-import seaborn as sns
+import seaborn as sns  # Seaborn is imported but not used, keep for potential future plots
 
-def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, consider_vat=True, repayment_type='monthly'):
-    """Calculate IRR using the logic from irr_calculator_app.py"""
-    base_amount = principal
-    monthly_fee = base_amount * monthly_rate * tenure
-    admin_fee = base_amount * admin_fee_rate
-    
-    if consider_vat:
-        # Apply 15% VAT reduction to fees
-        vat_rate = 0.15
-        monthly_fee_after_vat = monthly_fee * (1 - vat_rate)
-        admin_fee_after_vat = admin_fee * (1 - vat_rate)
-    else:
-        monthly_fee_after_vat = monthly_fee
-        admin_fee_after_vat = admin_fee
-    
-    total_income = monthly_fee_after_vat + admin_fee_after_vat
-    total_sales = base_amount + total_income
-    
-    cash_flows = []
-    cash_flows.append(-principal)  # Initial outflow
-    
-    if repayment_type == 'bullet':
-        # Single payment at the end including principal, total fee and admin fee
-        for i in range(tenure - 1):
-            cash_flows.append(0)
-        cash_flows.append(total_sales)
-    
-    elif repayment_type == 'monthly':
-        # Monthly payments
-        monthly_principal = base_amount / tenure
-        monthly_profit = monthly_fee_after_vat / tenure
-        
-        for i in range(tenure):
-            if i == 0:
-                cash_flows.append(monthly_principal + monthly_profit + admin_fee_after_vat)
-            else:
-                cash_flows.append(monthly_principal + monthly_profit)
-    
-    elif repayment_type == 'bi_monthly':
-        # Bi-monthly payments
-        num_payments = tenure // 2
-        remainder = tenure % 2
-        
-        payment_instances = num_payments + (1 if remainder > 0 else 0)
-        if payment_instances > 0:
-            bi_monthly_principal = base_amount / payment_instances
-            bi_monthly_profit = monthly_fee_after_vat / payment_instances
-        else:
-            bi_monthly_principal = 0
-            bi_monthly_profit = 0
-        
-        payment_made = False
-        for i in range(tenure):
-            is_payment_period = ((i + 1) % 2 == 0) or (i == tenure - 1 and remainder > 0)
-            
-            if is_payment_period and payment_instances > 0:
-                current_payment = bi_monthly_principal + bi_monthly_profit
-                if not payment_made:
-                    current_payment += admin_fee_after_vat
-                    payment_made = True
-                cash_flows.append(current_payment)
-            else:
-                cash_flows.append(0)
-    
-    try:
-        def npv(rate, cash_flows):
-            if rate <= -1:
-                return float('inf')
-            return sum(cf / (1 + rate) ** (i) for i, cf in enumerate(cash_flows))
-        
-        monthly_irr = optimize.newton(lambda r: npv(r, cash_flows), x0=0.1, tol=1e-6, maxiter=100)
-        annual_irr = (1 + monthly_irr) ** 12 - 1 if monthly_irr > -1 else float('nan')
-    except:
-        if principal > 0 and tenure > 0:
-            annual_irr = ((total_sales / principal) ** (12 / tenure)) - 1
-        else:
-            annual_irr = 0
-    
-    return annual_irr * 100  # Return as percentage
+# --- Initialization and Configuration ---
 
+# Must be the first Streamlit command
 st.set_page_config(
     page_title="Deal Pricing Calculator",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",  # Keep sidebar open initially
+    menu_items={
+        'About': "A calculator for determining minimum deal pricing based on risk, cash flow, and other factors."
+    }
 )
 
-st.title("Deal Pricing Calculator")
+# Initialize session state variables only if they don't exist
+defaults = {
+    'consider_vat': True,
+    'include_admin_fee': True,
+    'admin_fee_rate': 0.015,  # Store as rate (0.015), display as %
+    'repayment_type': "monthly",
+    'hk': 2.0,
+    'alpha': 0.55,
+    'psi': 0.04,
+    'gamma': 0.95,
+    'floor': 1.80,
+    'risk_tier': "r2",
+    'cash_bucket': "Normal",
+    'is_micro': False,
+    'principal': 100000.0,
+    'tenure': 3  # Default tenure to 3 months for more interesting initial IRR
+}
 
-# About section with LaTeX formulas
-st.markdown("## About This Calculator")
-st.markdown("""
-This calculator determines the minimum deal price based on risk tier, cash availability, and deal type. 
-The pricing model accounts for a base rate (Hk), risk adjustments, cash deployment pressure, and micro-deal premiums.
-The final price is the maximum of the calculated raw price and a floor value to ensure minimum profitability.
-""")
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-# Create tabs for formula explanation
-formula_tabs = st.tabs(["Base Formula", "Risk Multiplier", "Free Cash Ratio"])
+# Check for admin access via query parameter
+# Use st.query_params for the modern way to access query parameters
+query_params = st.query_params.to_dict()
+is_admin = query_params.get('access', '') == 'admin'
 
-with formula_tabs[0]:
-    st.markdown("""
-    ### Raw Price Formula
-    The raw price is calculated as:
-    """)
-    st.latex(r"P_{\text{raw}} = H_k + \alpha\,M_r - \psi\,F + \gamma\,I_{\text{micro}}")
-    st.markdown("""
-    Where:
-    - Hk: Base rate (H's constant)
-    - α: Risk-slope coefficient
-    - Mr: Risk multiplier
-    - ψ: Cash-pressure coefficient
-    - F: Free-cash ratio (%)
-    - γ: Micro-deal surcharge
-    - I_micro: 1 if micro ticket, 0 otherwise
-    """)
+# --- Calculation Functions ---
 
-with formula_tabs[1]:
-    st.markdown("### Risk Multiplier")
-    st.latex(r"""
-    M_r = \begin{cases}
-    0.75 & \text{if } r_1\\
-    1.00 & \text{if } r_2\\
-    1.25 & \text{if } r_3
-    \end{cases}
-    """)
-    st.markdown("Risk multipliers adjust the price based on the risk tier of the deal.")
+def calculate_irr(principal, monthly_rate, tenure, admin_fee_rate=0.015, consider_vat=True, repayment_type='monthly'):
+    """Calculate IRR (Annualized Percentage Rate)."""
+    if principal <= 0 or tenure <= 0:
+        return 0.0  # Avoid division by zero or meaningless calculation
 
-with formula_tabs[2]:
-    st.markdown("### Free Cash Ratio")
-    st.latex(r"F = 100 \times \frac{\text{Cash on hand}}{\text{AUM}_{\text{deployed}}}")
-    st.markdown("The free cash ratio determines price adjustments based on available capital.")
-    
-    st.markdown("### Cash Bucket Definitions")
-    st.markdown("""
-    | Cash Bucket | Free Cash Range | Business Impact |
-    |------------|-----------------|-----------------|
-    | Tight | 0 – 5% | About to run dry – squeeze pricing up |
-    | Normal | 5 – 15% | Business as usual |
-    | Flush | 15 – 30% | Deploy or die – discount aggressively |
-    | Excess | > 30% | You're hoarding – sell at cost |
-    """)
+    base_amount = principal
+    # Note: The formula calculates total fee based on *initial* monthly rate * tenure
+    total_monthly_fee = base_amount * monthly_rate * tenure
+    admin_fee = base_amount * admin_fee_rate if admin_fee_rate > 0 else 0
 
-st.markdown("---")
+    vat_rate = 0.15 if consider_vat else 0.0
 
-# Create main column for base parameters
-col1 = st.container()
+    # Apply VAT reduction to fees *before* distribution
+    monthly_fee_after_vat = total_monthly_fee * (1 - vat_rate)
+    admin_fee_after_vat = admin_fee * (1 - vat_rate)
 
-with col1:
-    st.subheader("Base Parameters")
-    params_cols = st.columns(5)
-    
-    with params_cols[0]:
-        hk = st.number_input("H's Constant (Hk)", min_value=1.3, max_value=2.5, value=2.0, step=0.1,
-                            help="Base rate (default: 2.0)")
-    
-    with params_cols[1]:
-        alpha = st.number_input("Risk Slope (α)", min_value=0.0, max_value=1.0, value=0.55, step=0.05,
-                               help="Risk adjustment factor (default: 0.55)")
-    
-    with params_cols[2]:
-        psi = st.number_input("Cash-Pressure (ψ)", min_value=0.0, max_value=0.1, value=0.04, step=0.01,
-                             help="Cash deployment pressure (default: 0.04)")
-    
-    with params_cols[3]:
-        gamma = st.number_input("Micro Surcharge (γ)", min_value=0.0, max_value=2.0, value=0.95, step=0.05,
-                               help="Additional charge for micro loans (default: 0.95)")
-    
-    with params_cols[4]:
-        floor = st.number_input("Price Floor", min_value=1.0, max_value=3.0, value=1.80, step=0.05,
-                               help="Minimum allowed price (default: 1.80)")
+    total_income_after_vat = monthly_fee_after_vat + admin_fee_after_vat
+    total_repayment_target = base_amount + total_income_after_vat # Total expected back from borrower
 
-# Create a small button for advanced settings
-if st.button("⚙️ Advanced Settings", help="Configure scenario and IRR parameters"):
-    with st.expander("Advanced Settings", expanded=True):
-        adv_col1, adv_col2 = st.columns(2)
+    cash_flows = [-principal]  # Initial outflow (t=0)
+
+    # Repayment Calculations (t=1 to t=tenure)
+    if repayment_type == 'monthly':
+        monthly_principal = base_amount / tenure
+        monthly_profit_component = monthly_fee_after_vat / tenure # Distribute VAT-adjusted fee evenly
         
-        with adv_col1:
-            st.markdown("##### Scenario Parameters")
-            risk_tier = st.selectbox(
-                "Risk Tier",
-                options=["r1", "r2", "r3"],
-                format_func=lambda x: f"{x} ({0.75 if x == 'r1' else 1.0 if x == 'r2' else 1.25}x multiplier)"
-            )
-            
-            cash_bucket = st.selectbox(
-                "Cash Bucket",
-                options=["Tight", "Normal", "Flush", "Excess"],
-                format_func=lambda x: f"{x} ({5 if x == 'Tight' else 10 if x == 'Normal' else 22 if x == 'Flush' else 35}% free cash)"
-            )
-            
-            repayment_type = st.selectbox(
-                "Repayment Structure",
-                options=["monthly", "bi_monthly", "bullet"],
-                format_func=lambda x: {
-                    "monthly": "Monthly Installments",
-                    "bi_monthly": "Bi-Monthly Installments",
-                    "bullet": "Bullet Payment (at end)"
-                }[x],
-                help="Choose how the principal and fees are repaid"
-            )
-            
-            is_micro = st.checkbox("Is Micro deal?", value=False)
-            consider_vat = st.checkbox("Consider 15% VAT Impact", value=True, 
-                help="When checked, IRR calculations will account for 15% VAT deduction from fees")
-            include_admin_fee = st.checkbox("Include Admin Fee", value=True,
-                help="When checked, a one-time admin fee will be included in IRR calculations")
+        # Distribute admin fee (if any) over the first payment
+        first_payment = monthly_principal + monthly_profit_component + admin_fee_after_vat
+        regular_payment = monthly_principal + monthly_profit_component
 
-        with adv_col2:
-            st.markdown("##### IRR Parameters")
-            principal = st.number_input("Principal Amount", min_value=1000.0, max_value=10000000.0, value=100000.0, step=10000.0)
-            tenure = st.number_input("Selected Tenure (months)", min_value=1, max_value=36, value=1, step=1)
-            if include_admin_fee:
-                admin_fee_rate = st.number_input("Admin Fee Rate (%)", min_value=0.0, max_value=5.0, value=1.5, step=0.1) / 100
+        cash_flows.append(first_payment)
+        for _ in range(tenure - 1):
+            cash_flows.append(regular_payment)
+
+    elif repayment_type == 'bullet':
+        # No payments until the end
+        for _ in range(tenure - 1):
+            cash_flows.append(0)
+        # Final payment includes principal + all fees (VAT adjusted)
+        cash_flows.append(total_repayment_target) # Principal + Total VAT-adjusted income
+
+    elif repayment_type == 'bi_monthly':
+        # Payments every 2 months, or at the end if tenure is odd
+        num_full_periods = tenure // 2
+        has_remainder = tenure % 2 != 0
+        num_payments = num_full_periods + (1 if has_remainder else 0)
+
+        if num_payments > 0:
+            payment_principal = base_amount / num_payments
+            payment_profit_component = monthly_fee_after_vat / num_payments
+            payment_admin_component = admin_fee_after_vat / num_payments # Distribute admin fee across payments
+            
+            regular_bi_monthly_payment = payment_principal + payment_profit_component + payment_admin_component
+            
+            payment_idx = 0
+            for i in range(1, tenure + 1):
+                is_payment_month = (i % 2 == 0) or (i == tenure and has_remainder)
+                if is_payment_month:
+                    cash_flows.append(regular_bi_monthly_payment)
+                    payment_idx += 1
+                else:
+                    cash_flows.append(0)
+            # Ensure correct number of cashflows (t=0 + t=1..tenure)
+            assert len(cash_flows) == tenure + 1, f"Expected {tenure+1} cashflows, got {len(cash_flows)}"
+        else: # Should not happen if tenure > 0
+             for _ in range(tenure): cash_flows.append(0)
+
+    # --- IRR Calculation ---
+    try:
+        # Use numpy_financial for robustness if available, fallback to scipy/simple calc
+        try:
+            import numpy_financial as npf
+            # npf.irr requires at least one positive and one negative value
+            if any(cf > 0 for cf in cash_flows) and any(cf < 0 for cf in cash_flows):
+                 monthly_irr = npf.irr(cash_flows)
+                 # Check if IRR calculation was successful (doesn't return nan or inf)
+                 if np.isfinite(monthly_irr):
+                     annual_irr = (1 + monthly_irr) ** 12 - 1
+                 else:
+                     raise ValueError("IRR calculation failed") # Force fallback
+            elif sum(cf for cf in cash_flows if cf > 0) > abs(principal):
+                # Approximate if npf fails but profit exists
+                annual_irr = ((total_repayment_target / principal) ** (12 / tenure)) - 1 if principal > 0 else 0
             else:
-                admin_fee_rate = 0.0
-else:
-    # Default values when advanced settings are hidden
-    risk_tier = "r2"  # Default to middle risk tier
-    cash_bucket = "Normal"  # Default to normal cash bucket
-    is_micro = False  # Default to non-micro deal
-    principal = 100000.0  # Default principal
-    tenure = 1  # Default tenure
-    admin_fee_rate = 0.015  # Default admin fee rate
-    consider_vat = True  # Default to considering VAT
-    include_admin_fee = True  # Default to including admin fee
-    repayment_type = "monthly"  # Default to monthly installments
+                annual_irr = -1 # Indicate loss if total repayments < principal
+        except (ImportError, ValueError): # Fallback if numpy_financial not installed or fails
+             # Define NPV function for scipy.optimize.newton
+            def npv(rate, flows):
+                if rate <= -1:  # Avoid domain error for (1+rate)
+                    return float('inf')
+                return sum(cf / (1 + rate)**i for i, cf in enumerate(flows))
 
-# Calculate the price
-risk_multipliers = {"r1": 0.75, "r2": 1.0, "r3": 1.25}
-cash_percentages = {"Tight": 5, "Normal": 10, "Flush": 22, "Excess": 35}
+            # Attempt to find IRR using Newton-Raphson method
+            try:
+                monthly_irr = optimize.newton(lambda r: npv(r, cash_flows), x0=0.1, tol=1e-6, maxiter=100)
+                # Check if the result is valid
+                if not np.isfinite(monthly_irr) or monthly_irr <= -1:
+                     raise optimize.nonlin.NoConvergence('Calculation failed')
+                annual_irr = (1 + monthly_irr) ** 12 - 1
+            except (RuntimeError, optimize.nonlin.NoConvergence):
+                # Further fallback: simple rate of return if optimization fails
+                if principal > 0 and tenure > 0 and total_repayment_target > 0:
+                    annual_irr = ((total_repayment_target / principal) ** (12 / tenure)) - 1
+                else:
+                    annual_irr = -1.0 if total_repayment_target < principal else 0.0 # Indicate loss or zero return
 
-R = risk_multipliers[risk_tier]
-F = cash_percentages[cash_bucket]
-I_micro = 1 if is_micro else 0
+    except Exception: # Catch-all for any unexpected error during calculation
+        # Provide a default value or signal an error (e.g., NaN)
+        annual_irr = np.nan # Indicate error
 
-P_raw = hk + alpha * R - psi * F + gamma * I_micro
-P_min = max(P_raw, floor)
+    return annual_irr * 100 if np.isfinite(annual_irr) else np.nan # Return as percentage or NaN
 
-# Calculate IRR for current scenario
-current_irr = calculate_irr(principal, P_min/100, tenure, 
-                          admin_fee_rate if include_admin_fee else 0.0, 
-                          consider_vat=consider_vat,
-                          repayment_type=repayment_type)
 
-# Generate matrices
-st.markdown("---")
-st.subheader("Pricing and IRR Matrices")
-
-def generate_matrices():
+def generate_matrices(hk, alpha, psi, gamma, floor, current_principal, current_admin_fee_rate, current_consider_vat, current_repayment_type):
+    """Generate Price and IRR matrices based on current parameters."""
     records = []
     tenures = range(1, 7)  # 1-6 months
-    
+    risk_multipliers = {"r1": 0.75, "r2": 1.0, "r3": 1.25}
+    cash_percentages = {"Tight": 5, "Normal": 10, "Flush": 22, "Excess": 35}
+
+    # Use a fixed principal for matrix generation for consistency,
+    # but use current settings for IRR calculation details
+    matrix_principal = 100000.0 # Or use current_principal if preferred
+
     for t in tenures:
         for r in ["r1", "r2", "r3"]:
-            for m in [False, True]:  # First core (False), then micro (True)
+            for m in [False, True]:  # Core (False), then Micro (True)
                 for c in ["Tight", "Normal", "Flush", "Excess"]:
                     R = risk_multipliers[r]
                     F = cash_percentages[c]
                     I = 1 if m else 0
-                    P = max(hk + alpha * R - psi * F + gamma * I, floor)
-                    irr = calculate_irr(principal, P/100, t, 
-                                      admin_fee_rate if include_admin_fee else 0.0, 
-                                      consider_vat=consider_vat,
-                                      repayment_type=repayment_type)
+                    P_raw = hk + alpha * R - psi * F + gamma * I
+                    P = max(P_raw, floor) # The price % per month
+
+                    # Calculate IRR for this specific matrix cell configuration
+                    irr = calculate_irr(matrix_principal, P/100, t,
+                                      admin_fee_rate=current_admin_fee_rate,
+                                      consider_vat=current_consider_vat,
+                                      repayment_type=current_repayment_type)
                     records.append({
                         "Tenure": t,
                         "Risk": r,
                         "Type": "Micro" if m else "Core",
                         "Cash bucket": c,
                         "Min price %/mo": round(P, 3),
-                        "IRR %": round(irr, 2)
+                        "IRR %": irr # Keep precision for now, round later
                     })
-    
+
     df = pd.DataFrame(records)
-    # Sort to ensure r1 core, r1 micro, r2 core, r2 micro, r3 core, r3 micro order
+    # Sort for consistent matrix layout
     df['Risk_order'] = df['Risk'].map({'r1': 0, 'r2': 1, 'r3': 2})
     df['Type_order'] = df['Type'].map({'Core': 0, 'Micro': 1})
-    df = df.sort_values(['Tenure', 'Risk_order', 'Type_order']).drop(['Risk_order', 'Type_order'], axis=1)
-    
-    # Create price matrix
-    price_matrix = df.pivot_table(
+    df['Cash_order'] = df['Cash bucket'].map({'Tight': 0, 'Normal': 1, 'Flush': 2, 'Excess': 3})
+    df = df.sort_values(['Tenure', 'Risk_order', 'Type_order', 'Cash_order']).drop(['Risk_order', 'Type_order', 'Cash_order'], axis=1)
+
+    # --- Create Price Matrix (Tenure-Independent) ---
+    # Pivot for the price matrix (doesn't depend on tenure)
+    price_matrix_df = df[df['Tenure'] == 1].pivot_table( # Price is same for all tenures, pick one
         index=["Risk", "Type"],
         columns="Cash bucket",
-        values="Min price %/mo"
+        values="Min price %/mo",
+        sort=False # Keep the sorted order
     )
-    
-    # Create IRR matrices for each tenure
-    irr_matrices = {}
+    # Reorder columns manually if pivot doesn't respect sort
+    price_matrix_df = price_matrix_df[["Tight", "Normal", "Flush", "Excess"]]
+
+    # --- Create IRR Matrices (One per Tenure) ---
+    irr_matrices_dict = {}
     for t in tenures:
-        irr_matrix = df[df['Tenure'] == t].pivot_table(
+        irr_matrix_df = df[df['Tenure'] == t].pivot_table(
             index=["Risk", "Type"],
             columns="Cash bucket",
-            values="IRR %"
+            values="IRR %",
+            sort=False # Keep the sorted order
         )
-        irr_matrices[t] = irr_matrix
-    
-    return price_matrix, irr_matrices
+        # Reorder columns manually
+        irr_matrix_df = irr_matrix_df[["Tight", "Normal", "Flush", "Excess"]]
+        irr_matrices_dict[t] = irr_matrix_df
 
-price_matrix, irr_matrices = generate_matrices()
+    return price_matrix_df, irr_matrices_dict
 
-# Display price matrix
-st.write("Minimum Price Matrix (%/month)")
-st.dataframe(price_matrix.style.format("{:.3f}"))
 
-# Display IRR matrices for each tenure
-irr_title_col, vat_toggle_col, admin_toggle_col, repayment_toggle_col = st.columns([2, 1, 1, 1])
-with irr_title_col:
-    st.write("IRR Matrices (%/year) by Tenure")
-with vat_toggle_col:
-    consider_vat = st.toggle("Include 15% VAT", value=consider_vat,
-        help="Toggle to see IRR values before/after 15% VAT deduction from fees")
-with admin_toggle_col:
-    include_admin_fee = st.toggle("Include Admin Fee", value=include_admin_fee,
-        help="Toggle to include/exclude one-time admin fee in IRR calculations")
-with repayment_toggle_col:
-    repayment_type = st.selectbox(
-        "Repayment Type",
-        options=["monthly", "bi_monthly", "bullet"],
-        format_func=lambda x: {
-            "monthly": "Monthly",
-            "bi_monthly": "Bi-Monthly",
-            "bullet": "Bullet"
-        }[x],
-        help="Choose how the principal and fees are repaid"
+# --- Sidebar for User Inputs ---
+st.sidebar.image("https://datascienceplc.com/assets/img/logo-new.png", width=200) # Placeholder Logo
+st.sidebar.title("⚙️ Deal Configuration")
+st.sidebar.markdown("Adjust the parameters for your specific deal.")
+
+st.sidebar.subheader("Deal Specifics")
+# Use session state keys for widgets to preserve state across reruns
+principal_input = st.sidebar.number_input(
+    "💰 Principal Amount",
+    min_value=1000.0, max_value=10000000.0,
+    value=st.session_state.principal, step=10000.0,
+    key="principal", # Link to session state
+    format="%.2f"
+)
+tenure_input = st.sidebar.number_input(
+    "⏳ Selected Tenure (months)",
+    min_value=1, max_value=36,
+    value=st.session_state.tenure, step=1,
+    key="tenure" # Link to session state
+)
+is_micro_input = st.sidebar.checkbox("🐜 Is Micro deal?",
+    value=st.session_state.is_micro,
+    key="is_micro", # Link to session state
+    help="Check if the deal principal is considered 'micro'."
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Risk & Cash Context")
+risk_tier_input = st.sidebar.selectbox(
+    "🚦 Risk Tier",
+    options=["r1", "r2", "r3"],
+    index=["r1", "r2", "r3"].index(st.session_state.risk_tier),
+    format_func=lambda x: f"{x} ({0.75 if x == 'r1' else 1.0 if x == 'r2' else 1.25}x Risk Multiplier)",
+    key="risk_tier", # Link to session state
+    help="Select the assessed risk category for the deal."
+)
+cash_bucket_input = st.sidebar.selectbox(
+    "💧 Cash Bucket",
+    options=["Tight", "Normal", "Flush", "Excess"],
+    index=["Tight", "Normal", "Flush", "Excess"].index(st.session_state.cash_bucket),
+    format_func=lambda x: f"{x} ({'0-5' if x == 'Tight' else '5-15' if x == 'Normal' else '15-30' if x == 'Flush' else '>30'}% Free Cash)",
+    key="cash_bucket", # Link to session state
+    help="Select the current cash availability situation."
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("IRR Calculation Options")
+consider_vat_input = st.sidebar.toggle("📉 Include 15% VAT",
+    value=st.session_state.consider_vat,
+    key="consider_vat", # Link to session state
+    help="Apply a 15% VAT reduction to calculated fees before IRR computation."
+)
+include_admin_fee_input = st.sidebar.toggle("🧾 Include Admin Fee",
+    value=st.session_state.include_admin_fee,
+    key="include_admin_fee", # Link to session state
+    help="Include a one-time admin fee in the first repayment cash flow."
+)
+
+admin_fee_rate_input = 1.5 # Default if not included
+if include_admin_fee_input:
+    # Input as percentage, store as rate
+    admin_fee_perc = st.sidebar.number_input("Admin Fee Rate (%)",
+        min_value=0.0, max_value=10.0,
+        value=st.session_state.admin_fee_rate * 100, # Display as %
+        step=0.1, format="%.1f",
+        key="admin_fee_rate_perc", # Use a different key for the widget if needed, or update session state directly
+        help="One-time fee charged as a percentage of the principal."
     )
+    # Update the session state rate value based on the percentage input
+    st.session_state.admin_fee_rate = admin_fee_perc / 100
+    admin_fee_rate_input = st.session_state.admin_fee_rate # Use the updated rate
+else:
+    # Ensure the rate is zero if the toggle is off
+    st.session_state.admin_fee_rate = 0.0
+    admin_fee_rate_input = 0.0
 
-# Recalculate matrices with current settings
-price_matrix, irr_matrices = generate_matrices()
 
-# Show current calculation parameters
-status_text = []
-if consider_vat:
-    status_text.append("after 15% VAT")
-if include_admin_fee:
-    status_text.append(f"including {admin_fee_rate*100:.1f}% admin fee")
-elif not include_admin_fee:
-    status_text.append("excluding admin fee")
-status_text.append(f"with {repayment_type.replace('_', '-')} repayment")
-st.caption(f"Values shown {', '.join(status_text)}")
+repayment_type_input = st.sidebar.selectbox(
+    "🗓️ Repayment Type",
+    options=["monthly", "bi_monthly", "bullet"],
+    index=["monthly", "bi_monthly", "bullet"].index(st.session_state.repayment_type),
+    format_func=lambda x: x.replace('_', ' ').title(), # Nicer display names
+    key="repayment_type", # Link to session state
+    help="Select how the principal and fees are repaid over the tenure."
+)
 
-tabs = st.tabs([f"{t} Month{'s' if t > 1 else ''}" for t in range(1, 7)])
 
-for i, tab in enumerate(tabs, 1):
+# --- Main Page Layout ---
+
+st.title("📈 Deal Pricing & IRR Calculator")
+st.markdown("An interactive tool to determine minimum pricing and analyze potential IRR based on deal parameters.")
+st.divider()
+
+# --- Admin Settings (Conditional) ---
+if is_admin:
+    with st.expander("🔒 Admin Settings: Core Pricing Parameters", expanded=False):
+        st.warning("⚠️ Caution: Modifying these values impacts all pricing calculations.")
+        p_cols = st.columns(5)
+        with p_cols[0]: st.number_input("Hk", min_value=1.0, max_value=3.0, value=st.session_state.hk, step=0.05, key="hk", help="Base rate constant.")
+        with p_cols[1]: st.number_input("α (Risk Slope)", min_value=0.0, max_value=1.0, value=st.session_state.alpha, step=0.05, key="alpha", help="Sensitivity to risk multiplier.")
+        with p_cols[2]: st.number_input("ψ (Cash Pressure)", min_value=0.0, max_value=0.1, value=st.session_state.psi, step=0.005, key="psi", help="Sensitivity to free cash ratio.")
+        with p_cols[3]: st.number_input("γ (Micro Surcharge)", min_value=0.0, max_value=2.0, value=st.session_state.gamma, step=0.05, key="gamma", help="Additive factor for micro deals.")
+        with p_cols[4]: st.number_input("Floor %", min_value=1.0, max_value=3.0, value=st.session_state.floor, step=0.05, key="floor", help="Minimum allowed price % per month.")
+        st.caption("Changes here are saved in the session state and affect calculations immediately.")
+    st.divider()
+
+# --- Use session state values for calculations (retrieved from widgets/admin panel) ---
+hk_val = st.session_state.hk
+alpha_val = st.session_state.alpha
+psi_val = st.session_state.psi
+gamma_val = st.session_state.gamma
+floor_val = st.session_state.floor
+# User inputs are already in session state via their keys
+
+# --- Perform Calculations ---
+risk_multipliers = {"r1": 0.75, "r2": 1.0, "r3": 1.25}
+cash_percentages = {"Tight": 5, "Normal": 10, "Flush": 22, "Excess": 35}
+
+R_val = risk_multipliers[st.session_state.risk_tier]
+F_val = cash_percentages[st.session_state.cash_bucket]
+I_micro_val = 1 if st.session_state.is_micro else 0
+
+P_raw_calc = hk_val + alpha_val * R_val - psi_val * F_val + gamma_val * I_micro_val
+P_min_calc = max(P_raw_calc, floor_val)
+
+# Calculate IRR for the *currently selected* scenario in the sidebar
+current_irr_calc = calculate_irr(
+    st.session_state.principal,
+    P_min_calc / 100, # Pass rate as decimal
+    st.session_state.tenure,
+    admin_fee_rate=st.session_state.admin_fee_rate, # Use the potentially updated rate
+    consider_vat=st.session_state.consider_vat,
+    repayment_type=st.session_state.repayment_type
+)
+
+# --- Display Key Results ---
+st.subheader("📊 Calculated Results for Current Deal")
+res_cols = st.columns(3)
+with res_cols[0]:
+    st.metric(label="Minimum Price (% / month)", value=f"{P_min_calc:.3f}%")
+with res_cols[1]:
+    st.metric(label="Calculated Annual IRR", value=f"{current_irr_calc:.2f}%" if not np.isnan(current_irr_calc) else "N/A")
+with res_cols[2]:
+    delta_val = P_min_calc - P_raw_calc
+    st.metric(label="Raw Calculated Price (% / month)", value=f"{P_raw_calc:.3f}%",
+              delta=f"{delta_val:.3f}% vs Floor" if delta_val > 0.001 else None,
+              help="Price before applying the minimum floor. Delta shows how much the floor increased the price.",
+              delta_color="inverse") # Positive delta means floor was binding (higher price)
+
+st.caption(f"Based on Principal: {st.session_state.principal:,.0f}, Tenure: {st.session_state.tenure}mo, "
+           f"Risk: {st.session_state.risk_tier}, Cash: {st.session_state.cash_bucket}, Type: {'Micro' if st.session_state.is_micro else 'Core'}")
+
+st.divider()
+
+# --- Pricing Model Explanation ---
+with st.expander("📖 Understanding the Pricing Model", expanded=False):
+    st.markdown("""
+    The minimum deal price is determined by several factors, aiming to balance risk, market conditions, and operational costs.
+    """)
+    formula_tabs = st.tabs(["Base Formula", "Risk Multiplier (Mr)", "Free Cash Ratio (F)", "Micro Deal (I_micro)"])
+    with formula_tabs[0]:
+        st.markdown("**Raw Price Formula:**")
+        st.latex(r"P_{\text{raw}} = H_k + \alpha\,M_r - \psi\,F + \gamma\,I_{\text{micro}}")
+        st.markdown("- **Hk:** Base rate (H's constant)\n"
+                    "- **α:** Risk-slope coefficient\n"
+                    "- **Mr:** Risk multiplier (see next tab)\n"
+                    "- **ψ:** Cash-pressure coefficient\n"
+                    "- **F:** Free-cash ratio % (see tab)\n"
+                    "- **γ:** Micro-deal surcharge\n"
+                    "- **I_micro:** Micro deal indicator (see tab)")
+        st.markdown("**Final Price:**")
+        st.latex(r"P_{\text{min}} = \max(P_{\text{raw}}, \text{Floor})")
+        st.markdown("The final price is the higher of the raw calculated price and the predefined floor.")
+
+    with formula_tabs[1]:
+        st.markdown("**Risk Multiplier (Mr):** Adjusts price based on perceived risk.")
+        st.latex(r"M_r = \begin{cases} 0.75 & \text{if Risk Tier = } r_1 \\ 1.00 & \text{if Risk Tier = } r_2 \\ 1.25 & \text{if Risk Tier = } r_3 \end{cases}")
+
+    with formula_tabs[2]:
+        st.markdown("**Free Cash Ratio (F %):** Reflects capital availability.")
+        # st.latex(r"F = 100 \times \frac{\text{Cash on hand}}{\text{AUM}_{\text{deployed}}}") # Simplified explanation below
+        st.markdown("""
+        | Cash Bucket | Free Cash % (Approx) | Interpretation                 | Price Impact (via -ψF) |
+        |-------------|----------------------|--------------------------------|------------------------|
+        | Tight       | 0 – 5%               | Need funds, price increases    | Highest Price Offset   |
+        | Normal      | 5 – 15%              | Business as usual              | Moderate Price Offset  |
+        | Flush       | 15 – 30%             | Need to deploy, price decreases| Low Price Offset       |
+        | Excess      | > 30%                | Hoarding cash, price decreases | Lowest Price Offset    |
+        """)
+        st.markdown(f"Current Model uses representative F values: Tight={cash_percentages['Tight']}%, Normal={cash_percentages['Normal']}%, Flush={cash_percentages['Flush']}%, Excess={cash_percentages['Excess']}%")
+
+
+    with formula_tabs[3]:
+        st.markdown("**Micro Deal Indicator (I_micro):** Applies a surcharge for smaller deals.")
+        st.latex(r"I_{\text{micro}} = \begin{cases} 1 & \text{if deal is Micro} \\ 0 & \text{if deal is Core} \end{cases}")
+        st.markdown(f"If checked, adds the γ value ({gamma_val:.2f}) directly to the raw price.")
+
+st.divider()
+
+
+# --- Generate and Display Matrices ---
+st.subheader("📅 Pricing & IRR Matrices (1-6 Months Tenure)")
+
+# Generate matrices based on current core parameters and IRR settings
+price_matrix, irr_matrices = generate_matrices(
+    hk_val, alpha_val, psi_val, gamma_val, floor_val,
+    st.session_state.principal, # Pass current principal for context if needed by function
+    st.session_state.admin_fee_rate,
+    st.session_state.consider_vat,
+    st.session_state.repayment_type
+)
+
+# Display Price Matrix
+st.markdown("**Minimum Price Matrix (% / month)**")
+st.caption("This matrix shows the calculated minimum monthly price percentage based on risk, deal type, and cash bucket. It is independent of tenure and IRR settings.")
+st.dataframe(price_matrix.style.format("{:.3f}%").highlight_max(axis=None, color='lightcoral').highlight_min(axis=None, color='lightgreen'))
+
+st.markdown("---") # Visual separator
+
+# Display IRR Matrices
+st.markdown("**Annual IRR Matrix (%)**")
+# Build status text based on current IRR settings
+status_parts = []
+if st.session_state.consider_vat: status_parts.append("includes 15% VAT reduction on fees")
+else: status_parts.append("excludes VAT reduction")
+if st.session_state.include_admin_fee and st.session_state.admin_fee_rate > 0: status_parts.append(f"includes {st.session_state.admin_fee_rate*100:.1f}% admin fee")
+else: status_parts.append("excludes admin fee")
+status_parts.append(f"uses '{st.session_state.repayment_type.replace('_', ' ').title()}' repayment")
+st.caption(f"Showing calculated Annual IRR based on the prices above and current sidebar settings: {', '.join(status_parts)}.")
+
+irr_tabs = st.tabs([f"{t} Month{'s' if t > 1 else ''}" for t in irr_matrices.keys()])
+
+for i, tab in enumerate(irr_tabs):
+    tenure_key = list(irr_matrices.keys())[i]
     with tab:
-        st.dataframe(irr_matrices[i].style.format("{:.2f}"))
+        st.dataframe(
+            irr_matrices[tenure_key].style.format("{:.2f}%", na_rep="N/A")
+                                     .background_gradient(cmap='viridis', axis=None) # Add heatmap
+                                     .highlight_null(color='gray')
+        )
 
-# 
+st.divider()
+
+# --- Footer ---
+st.markdown("---")
+st.caption("Deal Pricing Calculator v1.1 | Use sidebar for configuration`")
