@@ -485,6 +485,18 @@ with model_tab:
             - **γ:** Micro-deal surcharge
             - **I_micro:** Micro deal indicator (0 or 1)
             """)
+        
+        with components_col3:
+        st.markdown("**Free Cash Ratio (F %):** Reflects capital availability.")
+        st.markdown("""
+        | Cash Bucket | Free Cash % (Approx) | Interpretation                 | Price Impact (via -ψF) |
+        |-------------|----------------------|--------------------------------|------------------------|
+        | Tight       | 0 – 5%               | Need funds, price increases    | Highest Price Offset   |
+        | Normal      | 5 – 15%              | Business as usual              | Moderate Price Offset  |
+        | Flush       | 15 – 30%             | Need to deploy, price decreases| Low Price Offset       |
+        | Excess      | > 30%                | Hoarding cash, price decreases | Lowest Price Offset    |
+        """)
+            
     st.markdown("### 📊 Pricing & IRR Analysis")
     
     # Generate matrices
