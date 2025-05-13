@@ -462,41 +462,43 @@ with model_tab:
             with p_cols[4]: st.number_input("Floor %", min_value=1.0, max_value=3.0, value=st.session_state.floor, step=0.05, key="floor", help="Minimum allowed price % per month.")
     
     # Model Explanation
-    with st.expander("📖 Understanding the Pricing Model", expanded=True):
-        st.markdown("""
-        The minimum deal price is determined by several factors, aiming to balance risk, market conditions, and operational costs.
-        """)
-        st.markdown("#### Base Formula")
-        st.latex(r"P_{\text{raw}} = H_k + \alpha\,M_r - \psi\,F + \gamma\,I_{\text{micro}}")
-        st.markdown("#### Components")
-        components_col1, components_col2 = st.columns(2)
-        
-        with components_col1:
-            st.markdown("""
-            - **Hk:** Base rate constant
-            - **α:** Risk-slope coefficient
-            - **Mr:** Risk multiplier
-            - **ψ:** Cash-pressure coefficient
-            """)
-        
-        with components_col2:
-            st.markdown("""
-            - **F:** Free-cash ratio %
-            - **γ:** Micro-deal surcharge
-            - **I_micro:** Micro deal indicator (0 or 1)
-            """)
-        
-        with components_col3:
-        st.markdown("**Free Cash Ratio (F %):** Reflects capital availability.")
-        st.markdown("""
-        | Cash Bucket | Free Cash % (Approx) | Interpretation                 | Price Impact (via -ψF) |
-        |-------------|----------------------|--------------------------------|------------------------|
-        | Tight       | 0 – 5%               | Need funds, price increases    | Highest Price Offset   |
-        | Normal      | 5 – 15%              | Business as usual              | Moderate Price Offset  |
-        | Flush       | 15 – 30%             | Need to deploy, price decreases| Low Price Offset       |
-        | Excess      | > 30%                | Hoarding cash, price decreases | Lowest Price Offset    |
-        """)
-            
+with st.expander("📖 Understanding the Pricing Model", expanded=True):
+st.markdown("""
+The minimum deal price is determined by several factors, aiming to balance risk, market conditions, and operational costs.
+""")
+st.markdown("#### Base Formula")
+st.latex(r"P_{\text{raw}} = H_k + \alpha\,M_r - \psi\,F + \gamma\,I_{\text{micro}}")
+st.markdown("#### Components")
+components_col1, components_col2 = st.columns(2)
+
+with components_col1:
+    st.markdown("""
+    - **Hk:** Base rate constant
+    - **α:** Risk-slope coefficient
+    - **Mr:** Risk multiplier
+    - **ψ:** Cash-pressure coefficient
+    """)
+
+with components_col2:
+    st.markdown("""
+    - **F:** Free-cash ratio %
+    - **γ:** Micro-deal surcharge
+    - **I_micro:** Micro deal indicator (0 or 1)
+    """)
+
+with st.container():
+    st.markdown("**Free Cash Ratio (F %):** Reflects capital availability.")
+    # st.latex(r"F = 100 \times \frac{\text{Cash on hand}}{\text{AUM}_{\text{deployed}}}")
+    # Simplified explanation below
+    st.markdown("""
+    | Cash Bucket | Free Cash % (Approx) | Interpretation                 | Price Impact (via -ψF) |
+    |-------------|----------------------|--------------------------------|------------------------|
+    | Tight       | 0 – 5%               | Need funds, price increases    | Highest Price Offset   |
+    | Normal      | 5 – 15%              | Business as usual              | Moderate Price Offset  |
+    | Flush       | 15 – 30%             | Need to deploy, price decreases| Low Price Offset       |
+    | Excess      | > 30%                | Hoarding cash, price decreases | Lowest Price Offset    |
+    """)
+
     st.markdown("### 📊 Pricing & IRR Analysis")
     
     # Generate matrices
